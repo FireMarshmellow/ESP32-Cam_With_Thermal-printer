@@ -36,6 +36,12 @@ Adafruit_Thermal printer(&mySerial);
 
 #define BOOT_BUTTON_PIN  0  // Active LOW
 
+#define IND_LED_PIN 3
+#define IR_LED_PIN 47
+
+#define CONTRAST_FACTOR 1.2f   // increase contrast ( >1.0 increases contrast)
+#define SHARPEN_AMOUNT 0.2f    // horizontal sharpening factor
+
 int fileCounter = 0;
 
 // ------------------ Function Prototypes ------------------
@@ -70,6 +76,10 @@ void setup() {
   printer.begin();
 
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+  pinMode(IND_LED_PIN, OUTPUT);
+  pinMode(IR_LED_PIN, OUTPUT);
+  digitalWrite(IND_LED_PIN, LOW);
+  digitalWrite(IR_LED_PIN, LOW);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -125,7 +135,16 @@ void setup() {
 void loop() {
   waitForButtonPress();
 
+  // Turn on IR LED and flash the indicator LED before capturing the photo
+  digitalWrite(IR_LED_PIN, HIGH);     // Activate IR LEDs
+  digitalWrite(IND_LED_PIN, HIGH);      // Turn on indicator LED
+  delay(100);                         // Flash duration
+  digitalWrite(IND_LED_PIN, LOW);       // Turn off indicator LED
+
   String bmpPath = saveBMPtoSD();
+
+  digitalWrite(IR_LED_PIN, LOW);        // Turn off IR LEDs after capture
+
   if (bmpPath != "") {
     if (printBMP(bmpPath)) {
       Serial.println("Printing complete.");
@@ -166,7 +185,7 @@ String saveBMPtoSD() {
   }
 
   char filename[32];
-  snprintf(filename, sizeof(filename), "/capture_%03d.bmp", fileCounter);
+  snprintf(filename, sizeof(filename), "/photo%03d.bmp", fileCounter);
   File file = SD.open(filename, FILE_WRITE);
   if (!file) {
     Serial.println("Failed to open BMP file");
@@ -187,7 +206,7 @@ int getNextFileCounter() {
   int counter = 0;
   while (true) {
     char filename[32];
-    snprintf(filename, sizeof(filename), "/capture_%03d.bmp", counter);
+    snprintf(filename, sizeof(filename), "/photo%03d.bmp", counter);
     if (!SD.exists(filename)) {
       return counter;
     }
@@ -238,13 +257,18 @@ bool printBMP(const String &bmpFilename) {
     return false;
   }
 
+  // Preload first row:
   int preloadY = isTopDown ? 0 : height - 1;
   bmp.seek(offset + rowSize * preloadY);
   for (int x = 0; x < width; x++) {
     uint8_t b = bmp.read();
     uint8_t g = bmp.read();
     uint8_t r = bmp.read();
-    rowB[x] = 0.299f * r + 0.587f * g + 0.114f * b;
+    float gray = 0.299f * r + 0.587f * g + 0.114f * b;
+    gray = 128 + CONTRAST_FACTOR * (gray - 128);
+    if(gray < 0) gray = 0;
+    if(gray > 255) gray = 255;
+    rowB[x] = gray;
   }
 
   uint16_t widthBytes = (width + 7) / 8;
@@ -262,6 +286,14 @@ bool printBMP(const String &bmpFilename) {
     int y = isTopDown ? i : (height - 1 - i);
     memcpy(rowA, rowB, width * sizeof(float));
 
+    // Apply horizontal sharpening on rowA:
+    for (int x = 1; x < width - 1; x++) {
+      float sharpen = rowA[x] * (1 + SHARPEN_AMOUNT) - (rowA[x - 1] + rowA[x + 1]) * (SHARPEN_AMOUNT / 2);
+      if(sharpen < 0) sharpen = 0;
+      if(sharpen > 255) sharpen = 255;
+      rowA[x] = sharpen;
+    }
+
     if (i < height - 1) {
       int nextY = isTopDown ? (i + 1) : (height - 2 - i);
       bmp.seek(offset + rowSize * nextY);
@@ -269,7 +301,11 @@ bool printBMP(const String &bmpFilename) {
         uint8_t b = bmp.read();
         uint8_t g = bmp.read();
         uint8_t r = bmp.read();
-        rowB[x] = 0.299f * r + 0.587f * g + 0.114f * b;
+        float gray = 0.299f * r + 0.587f * g + 0.114f * b;
+        gray = 128 + CONTRAST_FACTOR * (gray - 128);
+        if(gray < 0) gray = 0;
+        if(gray > 255) gray = 255;
+        rowB[x] = gray;
       }
     } else {
       memset(rowB, 255, width * sizeof(float));
@@ -302,12 +338,10 @@ bool printBMP(const String &bmpFilename) {
     }
   }
 
-  flipBitmapVertically(ditheredBitmap, height, widthBytes);
-
-  printer.println(bmpFilename);
+  String displayName = bmpFilename.substring(1, bmpFilename.length() - 4);
+  //printer.println("You Met Mellow! At Mellow_Con");
   printBitmapRaw(ditheredBitmap, width, height);
-  printer.feed(1);
-  printer.println("Bitmap printed!");
+  printer.println(displayName);
   printer.feed(1);
 
   free(ditheredBitmap);
