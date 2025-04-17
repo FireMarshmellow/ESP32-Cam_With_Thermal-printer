@@ -12,6 +12,7 @@ HardwareSerial mySerial(1);  // Use HardwareSerial instance 1
 Adafruit_Thermal printer(&mySerial);
 
 // ------------------ Camera & SD Setup ------------------
+// CAMERA PINS (DFRobot ESP32-S3 AI Camera OV3660)
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      5
@@ -29,18 +30,14 @@ Adafruit_Thermal printer(&mySerial);
 #define HREF_GPIO_NUM      2
 #define PCLK_GPIO_NUM     15
 
+// SD Card Pins
 #define SD_CS     10
 #define SD_MOSI   11
 #define SD_MISO   13
 #define SD_CLK    12
 
+// Button to trigger capture
 #define BOOT_BUTTON_PIN  0  // Active LOW
-
-#define IND_LED_PIN 3
-#define IR_LED_PIN 47
-
-#define CONTRAST_FACTOR 1.2f   // increase contrast ( >1.0 increases contrast)
-#define SHARPEN_AMOUNT 0.2f    // horizontal sharpening factor
 
 int fileCounter = 0;
 
@@ -50,9 +47,9 @@ String saveBMPtoSD();
 bool printBMP(const String &bmpFilename);
 void printBitmapRaw(const uint8_t *bitmap, uint16_t width, uint16_t height);
 void flipBitmapVertically(uint8_t *bitmap, uint16_t height, uint16_t rowBytes);
-int getNextFileCounter();
 
 // ------------------ Flip Bitmap Vertically ------------------
+// This function swaps rows in the bitmap buffer so that the image is flipped vertically.
 void flipBitmapVertically(uint8_t *bitmap, uint16_t height, uint16_t rowBytes) {
   uint8_t *temp = (uint8_t *) malloc(rowBytes);
   if (!temp) {
@@ -72,15 +69,14 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
 
+  // Initialize hardware serial for printer
   mySerial.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
   printer.begin();
 
+  // Configure button pin
   pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(IND_LED_PIN, OUTPUT);
-  pinMode(IR_LED_PIN, OUTPUT);
-  digitalWrite(IND_LED_PIN, LOW);
-  digitalWrite(IR_LED_PIN, LOW);
 
+  // Camera configuration
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -102,7 +98,7 @@ void setup() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_RGB565;
-  config.frame_size = FRAMESIZE_CIF;
+  config.frame_size = FRAMESIZE_CIF; // e.g., 400x296
   config.fb_count = 1;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.grab_mode = CAMERA_GRAB_LATEST;
@@ -120,14 +116,13 @@ void setup() {
     return;
   }
 
+  // Initialize SD card
   SPI.begin(SD_CLK, SD_MISO, SD_MOSI, SD_CS);
   if (!SD.begin(SD_CS)) {
     Serial.println("SD card init failed!");
     return;
   }
 
-  fileCounter = getNextFileCounter();
-  Serial.printf("Next available file number: %d\n", fileCounter);
   Serial.println("Setup complete.");
 }
 
@@ -135,17 +130,10 @@ void setup() {
 void loop() {
   waitForButtonPress();
 
-  // Turn on IR LED and flash the indicator LED before capturing the photo
-  digitalWrite(IR_LED_PIN, HIGH);     // Activate IR LEDs
-  digitalWrite(IND_LED_PIN, HIGH);      // Turn on indicator LED
-  delay(100);                         // Flash duration
-  digitalWrite(IND_LED_PIN, LOW);       // Turn off indicator LED
-
+  // Capture image and save as BMP to SD card
   String bmpPath = saveBMPtoSD();
-
-  digitalWrite(IR_LED_PIN, LOW);        // Turn off IR LEDs after capture
-
   if (bmpPath != "") {
+    // Process the BMP and print it directly
     if (printBMP(bmpPath)) {
       Serial.println("Printing complete.");
     } else {
@@ -163,7 +151,7 @@ void waitForButtonPress() {
     delay(10);
   }
   Serial.println("Button pressed!");
-  delay(100);
+  delay(100); // debounce
 }
 
 // ------------------ Save BMP to SD ------------------
@@ -185,7 +173,7 @@ String saveBMPtoSD() {
   }
 
   char filename[32];
-  snprintf(filename, sizeof(filename), "/photo%03d.bmp", fileCounter);
+  snprintf(filename, sizeof(filename), "/capture_%03d.bmp", fileCounter);
   File file = SD.open(filename, FILE_WRITE);
   if (!file) {
     Serial.println("Failed to open BMP file");
@@ -201,22 +189,7 @@ String saveBMPtoSD() {
   return String(filename);
 }
 
-// ------------------ Get Next Available File Counter ------------------
-int getNextFileCounter() {
-  int counter = 0;
-  while (true) {
-    char filename[32];
-    snprintf(filename, sizeof(filename), "/photo%03d.bmp", counter);
-    if (!SD.exists(filename)) {
-      return counter;
-    }
-    counter++;
-    if (counter > 999) break;
-  }
-  return counter;
-}
-
-// ------------------ Print BMP ------------------
+// ------------------ Print BMP from SD ------------------
 bool printBMP(const String &bmpFilename) {
   File bmp = SD.open(bmpFilename);
   if (!bmp) {
@@ -247,6 +220,7 @@ bool printBMP(const String &bmpFilename) {
   int rowSize = (width * 3 + 3) & ~3;
   bmp.seek(offset);
 
+  // Allocate row buffers for dithering
   float* rowA = (float*) ps_malloc(width * sizeof(float));
   float* rowB = (float*) ps_malloc(width * sizeof(float));
   if (!rowA || !rowB) {
@@ -257,20 +231,17 @@ bool printBMP(const String &bmpFilename) {
     return false;
   }
 
-  // Preload first row:
+  // Preload first row into rowB (depending on image orientation)
   int preloadY = isTopDown ? 0 : height - 1;
   bmp.seek(offset + rowSize * preloadY);
   for (int x = 0; x < width; x++) {
     uint8_t b = bmp.read();
     uint8_t g = bmp.read();
     uint8_t r = bmp.read();
-    float gray = 0.299f * r + 0.587f * g + 0.114f * b;
-    gray = 128 + CONTRAST_FACTOR * (gray - 128);
-    if(gray < 0) gray = 0;
-    if(gray > 255) gray = 255;
-    rowB[x] = gray;
+    rowB[x] = 0.299f * r + 0.587f * g + 0.114f * b;
   }
 
+  // Calculate number of bytes per row for the 1-bit bitmap
   uint16_t widthBytes = (width + 7) / 8;
   uint8_t* ditheredBitmap = (uint8_t*) malloc(height * widthBytes);
   if (!ditheredBitmap) {
@@ -282,18 +253,15 @@ bool printBMP(const String &bmpFilename) {
   }
   size_t byteIndex = 0;
 
+  // Process each row
   for (int i = 0; i < height; i++) {
+    // For bottom-up BMP files, calculate correct row order
     int y = isTopDown ? i : (height - 1 - i);
+
+    // Copy current row (rowB) into rowA for processing
     memcpy(rowA, rowB, width * sizeof(float));
 
-    // Apply horizontal sharpening on rowA:
-    for (int x = 1; x < width - 1; x++) {
-      float sharpen = rowA[x] * (1 + SHARPEN_AMOUNT) - (rowA[x - 1] + rowA[x + 1]) * (SHARPEN_AMOUNT / 2);
-      if(sharpen < 0) sharpen = 0;
-      if(sharpen > 255) sharpen = 255;
-      rowA[x] = sharpen;
-    }
-
+    // Load next row into rowB if available
     if (i < height - 1) {
       int nextY = isTopDown ? (i + 1) : (height - 2 - i);
       bmp.seek(offset + rowSize * nextY);
@@ -301,19 +269,17 @@ bool printBMP(const String &bmpFilename) {
         uint8_t b = bmp.read();
         uint8_t g = bmp.read();
         uint8_t r = bmp.read();
-        float gray = 0.299f * r + 0.587f * g + 0.114f * b;
-        gray = 128 + CONTRAST_FACTOR * (gray - 128);
-        if(gray < 0) gray = 0;
-        if(gray > 255) gray = 255;
-        rowB[x] = gray;
+        rowB[x] = 0.299f * r + 0.587f * g + 0.114f * b;
       }
     } else {
+      // Last row padding
       memset(rowB, 255, width * sizeof(float));
     }
 
     uint8_t outByte = 0;
     int bit = 7;
 
+    // Dither this row and pack 8 pixels per output byte
     for (int x = 0; x < width; x++) {
       float oldPixel = rowA[x];
       float newPixel = oldPixel < 128 ? 0 : 255;
@@ -338,12 +304,17 @@ bool printBMP(const String &bmpFilename) {
     }
   }
 
-  String displayName = bmpFilename.substring(1, bmpFilename.length() - 4);
-  //printer.println("You Met Mellow! At Mellow_Con");
-  printBitmapRaw(ditheredBitmap, width, height);
-  printer.println(displayName);
-  printer.feed(1);
+  // Flip the dithered bitmap vertically before printing
+  flipBitmapVertically(ditheredBitmap, height, widthBytes);
 
+  // Now print the dithered bitmap via the thermal printer
+  printer.println("Printing bitmap (raw)...");
+  printBitmapRaw(ditheredBitmap, width, height);
+  printer.feed(2);
+  printer.println("Bitmap printed!");
+  printer.feed(2);
+
+  // Clean up
   free(ditheredBitmap);
   free(rowA);
   free(rowB);
@@ -359,6 +330,7 @@ void printBitmapRaw(const uint8_t *bitmap, uint16_t width, uint16_t height) {
   uint8_t yL = height & 0xFF;
   uint8_t yH = (height >> 8) & 0xFF;
 
+  // ESC/POS raster bitmap command with explicit casts
   mySerial.write((uint8_t)0x1D);
   mySerial.write((uint8_t)0x76);
   mySerial.write((uint8_t)0x30);
