@@ -1,6 +1,6 @@
 # Capture\_Dither\_Save\_Print\_V3
-
-[🎥 Watch a demo on YouTube](https://www.youtube.com/watch?v=)
+## Project video
+[![Video Title](https://img.youtube.com/vi/8lnDPz4QZjQ/0.jpg)](https://www.youtube.com/watch?v=8lnDPz4QZjQ)
 
 ## Overview
 
